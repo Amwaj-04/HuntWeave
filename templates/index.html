@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="HuntWeave is an educational, synthetic-data threat hunting lab built around hypotheses, evidence, and defensible conclusions.">
+  <title>HuntWeave — From hypothesis to evidence</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/" aria-label="HuntWeave home">
+    <img class="logo-light" src="/static/mark-light.svg" alt="" width="36" height="36"><img class="logo-dark" src="/static/mark-dark.svg" alt="" width="36" height="36">
+    <span><strong>HuntWeave</strong><small>THREAT HUNTING LAB</small></span>
+  </a>
+  <div class="top-actions"><span class="env-pill"><i></i> SYNTHETIC LAB</span><button id="themeToggle" class="icon-btn" aria-label="Toggle light and dark theme">◐</button></div>
+</header>
+<main class="shell">
+  <section class="hero">
+    <div class="hero-copy"><p class="eyebrow">HYPOTHESIS-DRIVEN INVESTIGATION <span>·</span> 01 / 03</p>
+      <h1>Find the story<br><em>inside the events.</em></h1>
+      <p class="hero-lede">A guided threat-hunting lab for exploring synthetic security events, testing a hypothesis, and documenting what the evidence can — and cannot — prove.</p>
+      <div class="hero-note"><span class="note-mark">↳</span><span><strong>Evidence first. Conclusions second.</strong><small>Training environment · No live telemetry · No endpoint actions</small></span></div>
+    </div>
+    <div class="hero-art" aria-hidden="true"><div class="art-grid"></div><svg viewBox="0 0 360 280" role="img"><path class="line line-a" d="M28 55 C95 55 80 126 160 126 S225 214 330 214"/><path class="line line-b" d="M28 214 C92 214 95 126 160 126 S236 55 330 55"/><path class="line line-c" d="M28 134 L88 134"/><circle class="node" cx="28" cy="55" r="5"/><circle class="node" cx="28" cy="214" r="5"/><circle class="node node-main" cx="160" cy="126" r="9"/><circle class="node" cx="330" cy="55" r="5"/><circle class="node" cx="330" cy="214" r="5"/><circle class="halo" cx="160" cy="126" r="22"/><text x="18" y="35">SIGNAL</text><text x="18" y="242">CONTEXT</text><text x="210" y="112">EVIDENCE</text><text x="258" y="242">FINDING</text></svg><div class="art-caption">A hypothesis is a question —<br>not a verdict.</div></div>
+  </section>
+  <section class="metrics" aria-label="Lab summary">
+    <div class="metric"><span class="metric-label">HUNT SCENARIOS</span><strong>03</strong><small>Guided investigations</small></div>
+    <div class="metric"><span class="metric-label">SYNTHETIC EVENTS</span><strong>{{ event_count }}</strong><small>Curated training records</small></div>
+    <div class="metric"><span class="metric-label">WORKFLOW</span><strong>4 steps</strong><small>Hypothesis → evidence → finding</small></div>
+  </section>
+  <section class="section-head"><div><p class="eyebrow">YOUR WORKSPACE</p><h2>Choose a hunt</h2><p class="section-sub">Start with the question. Follow the evidence. Keep uncertainty visible.</p></div><span class="small-label">SAMPLE CASES / V1</span></section>
+  <section class="hunt-grid" id="huntGrid">
+  {% for hunt in hunts %}
+    <article class="hunt-card" data-hunt="{{ hunt.id }}">
+      <div class="card-top"><span class="case-id">{{ hunt.id }}</span><span class="tag tag-{{ hunt.level|lower }}">{{ hunt.level }}</span></div>
+      <div class="card-icon {% if hunt.category == 'Endpoint' %}endpoint{% elif hunt.category == 'Identity' %}identity{% else %}privilege{% endif %}">{% if hunt.category == 'Endpoint' %}⌘{% elif hunt.category == 'Identity' %}◎{% else %}⌁{% endif %}</div>
+      <p class="card-category">{{ hunt.category }} <span>·</span> {{ hunt.technique }}</p>
+      <h3>{{ hunt.title }}</h3><p class="card-desc">{{ hunt.hypothesis }}</p>
+      <div class="card-footer"><span>{{ hunt.event_count }} related events</span><span class="state state-{{ hunt.state|lower }}">{{ hunt.state_label }}</span></div>
+      <button class="text-button open-hunt" data-id="{{ hunt.id }}">Open investigation <span>↗</span></button>
+    </article>
+  {% endfor %}
+  </section>
+  <section class="principle"><div class="principle-symbol">∴</div><div><p class="eyebrow">ANALYST PRINCIPLE</p><h2>Suspicious is not the same as malicious.</h2><p>A useful hunt records supporting evidence, conflicting context, and what remains unknown. This lab rewards defensible reasoning — not confident guesses.</p></div></section>
+  <footer><span>HuntWeave <span class="muted">· Educational prototype</span></span><span>All records are synthetic. Not for operational security decisions.</span></footer>
+</main>
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <section class="investigation" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-header"><div class="brand compact"><img class="logo-light" src="/static/mark-light.svg" alt="" width="30" height="30"><img class="logo-dark" src="/static/mark-dark.svg" alt="" width="30" height="30"><span><strong>HuntWeave</strong><small>INVESTIGATION WORKSPACE</small></span></div><button id="closeModal" class="icon-btn" aria-label="Close investigation">×</button></div>
+    <div id="investigationContent" class="investigation-content"><div class="loading">Loading investigation…</div></div>
+  </section>
+</div>
+<script src="/static/app.js" defer></script>
+</body></html>
