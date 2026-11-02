@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,54 @@ class HuntWeaveTests(unittest.TestCase):
     def tearDown(self):
         hunt_app.DB_PATH = self.old_db
         self.tmp.cleanup()
+
+    def test_database_initialization_is_idempotent(self):
+        hunt_app.init_db()
+        hunt_app.init_db()
+        with hunt_app.db_session() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            self.assertEqual(count, 18)
+
+    def test_database_parent_is_created_automatically(self):
+        nested_db = Path(self.tmp.name) / "missing" / "folder" / "huntweave.db"
+        hunt_app.DB_PATH = nested_db
+        hunt_app.init_db()
+        self.assertTrue(nested_db.is_file())
+        with hunt_app.db_session() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 18)
+
+    def test_legacy_notes_table_is_preserved_during_schema_migration(self):
+        legacy_db = Path(self.tmp.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_db)
+        connection.execute("""
+            CREATE TABLE hunt_notes (
+                hunt_id TEXT PRIMARY KEY,
+                verdict TEXT NOT NULL DEFAULT 'NOT_REVIEWED',
+                notes TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+        """)
+        connection.execute(
+            "INSERT INTO hunt_notes VALUES (?, ?, ?, ?)",
+            ("HW-001", "SUPPORTED", "Legacy finding", "2026-10-28T10:00:00+00:00"),
+        )
+        connection.commit()
+        connection.close()
+
+        hunt_app.DB_PATH = legacy_db
+        hunt_app.init_db()
+
+        with hunt_app.db_session() as conn:
+            current_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(hunt_notes)")
+            }
+            self.assertIn("visitor_id", current_columns)
+            legacy = conn.execute(
+                "SELECT verdict, notes FROM hunt_notes_legacy WHERE hunt_id='HW-001'"
+            ).fetchone()
+            self.assertEqual(legacy["verdict"], "SUPPORTED")
+            self.assertEqual(legacy["notes"], "Legacy finding")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 18)
 
     def test_home_serves_three_hunts(self):
         response = self.client.get("/")
@@ -35,6 +84,16 @@ class HuntWeaveTests(unittest.TestCase):
         data = response.get_json()
         self.assertGreaterEqual(len(data["events"]), 4)
         self.assertTrue(all(e["account"] == "m.alotaibi" for e in data["events"]))
+
+    def test_hunt_api_does_not_expose_internal_metadata(self):
+        response = self.client.get("/api/hunts/HW-001")
+        self.assertEqual(response.status_code, 200)
+        hunt = response.get_json()["hunt"]
+        self.assertNotIn("expected", hunt)
+        self.assertNotIn("dataset", hunt)
+        self.assertIn("hypothesis", hunt)
+        note = response.get_json()["note"]
+        self.assertNotIn("visitor_id", note)
 
     def test_invalid_source_filter_rejected(self):
         response = self.client.get("/api/hunts/HW-001?source=all;drop")
@@ -66,6 +125,19 @@ class HuntWeaveTests(unittest.TestCase):
         self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
         self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
         self.assertIn("default-src 'self'", response.headers.get("Content-Security-Policy", ""))
+
+
+    def test_browser_workspaces_are_isolated(self):
+        other_client = hunt_app.app.test_client()
+        payload = {"verdict": "SUPPORTED", "notes": "This note belongs to the first browser."}
+        response = self.client.post("/api/hunts/HW-001/review", json=payload)
+        self.assertEqual(response.status_code, 200)
+        first = self.client.get("/api/hunts/HW-001").get_json()["note"]
+        second = other_client.get("/api/hunts/HW-001").get_json()["note"]
+        self.assertEqual(first["verdict"], "SUPPORTED")
+        self.assertEqual(first["notes"], payload["notes"])
+        self.assertEqual(second["verdict"], "NOT_REVIEWED")
+        self.assertEqual(second["notes"], "")
 
     def test_report_is_json_and_synthetic(self):
         response = self.client.get("/api/report/HW-003")

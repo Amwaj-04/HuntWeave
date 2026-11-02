@@ -21,7 +21,7 @@
     openerElement = document.activeElement;
     activeHunt = id;
     backdrop.hidden = false;
-    document.body.style.overflow = 'hidden';
+    document.body.classList.add('modal-open');
     closeButton.focus();
     content.innerHTML = '<div class="loading">Loading investigation…</div>';
     try {
@@ -87,7 +87,7 @@
       const response = await fetch(`/api/hunts/${encodeURIComponent(id)}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({verdict:document.getElementById('verdict').value, notes:document.getElementById('analystNotes').value})});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Save failed');
-      feedback.textContent = 'Finding saved in this local lab.';
+      feedback.textContent = 'Finding saved in this workspace.';
       const card = document.querySelector(`[data-hunt="${CSS.escape(id)}"] .state`);
       if (card) { card.textContent = labelVerdict(data.verdict); card.className = `state state-${data.verdict.toLowerCase()}`; }
       feedback.dataset.kind = 'success';
@@ -118,7 +118,7 @@
 
   function closeModal() {
     backdrop.hidden = true;
-    document.body.style.overflow = '';
+    document.body.classList.remove('modal-open');
     activeHunt = null;
     if (openerElement && typeof openerElement.focus === 'function') openerElement.focus();
   }

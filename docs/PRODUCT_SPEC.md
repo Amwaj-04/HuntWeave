@@ -30,12 +30,13 @@ A cybersecurity learner preparing to explain basic hypothesis-driven investigati
 - Verdict values are allow-listed and analyst notes are limited to 2,000 characters.
 - Findings persist locally and JSON reports include the current saved finding and scenario evidence.
 - Reset affects only the selected scenario’s finding and notes; unknown scenario IDs return 404.
-- A clean install creates its database automatically.
+- A clean install creates the `data/` directory and SQLite database automatically, and seeds the 18 synthetic events when the table is empty.
+- An older single-workspace findings table is preserved under a legacy table name when migrating to per-browser workspaces.
 - Automated tests cover core routes, validation, search, and report output.
-- The app binds to localhost by default and does not configure public hosting.
+- The local development server binds to localhost by default; an optional Render Blueprint supports a hosted educational demo.
 
 ## Out of scope
-Enterprise SIEM integration, real telemetry, endpoint actions, automated response, machine learning, user accounts, multi-user isolation, public hosting, and claims of formal compliance/certification.
+Enterprise SIEM integration, real telemetry, endpoint actions, automated response, machine learning, authenticated user accounts, cross-user collaboration, production-grade public hosting, and claims of formal compliance/certification.
 
 ## Name status
 HuntWeave is a working title only. Initial web searches are not trademark clearance or proof of availability. Before public release, check official trademark databases, confusingly similar names, domain availability, and repository naming.

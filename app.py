@@ -7,13 +7,22 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from flask import Flask, jsonify, render_template, request, abort, Response
+from flask import Flask, jsonify, render_template, request, abort, Response, session
+import secrets
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = Path(os.environ.get("HUNTWEAVE_DB", DATA_DIR / "huntweave.db"))
 
 app = Flask(__name__)
+IS_RENDER = os.environ.get("RENDER", "").lower() == "true"
+configured_secret = os.environ.get("HUNTWEAVE_SECRET_KEY")
+if IS_RENDER and not configured_secret:
+    raise RuntimeError("HUNTWEAVE_SECRET_KEY must be configured on Render.")
+app.config["SECRET_KEY"] = configured_secret or "local-development-only-change-for-public-deployment"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = IS_RENDER
 app.config["JSON_SORT_KEYS"] = False
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024  # review notes are deliberately small
 
@@ -42,7 +51,7 @@ HUNTS = [
         "hypothesis": "A sequence of failed sign-ins followed by a successful sign-in may indicate credential guessing or a legitimate user recovering access.",
         "look_for": "Multiple failures for the same account followed by a success from the same source within a short window.",
         "limits": "This pattern alone does not prove account compromise. Shared NAT, mistyped passwords, and user behavior can produce similar events.",
-        "expected": "inconclusive", "dataset": "identity"
+        "dataset": "identity"
     },
     {
         "id": "HW-002", "title": "PowerShell launched from an unusual parent process",
@@ -50,7 +59,7 @@ HUNTS = [
         "hypothesis": "PowerShell launched by an unusual parent process may deserve review, but administrative automation can look similar.",
         "look_for": "PowerShell process events, parent process context, account, host, and command-line indicators.",
         "limits": "A process name or command-line fragment is not sufficient to label activity malicious. Validate parent process and business context.",
-        "expected": "benign", "dataset": "endpoint"
+        "dataset": "endpoint"
     },
     {
         "id": "HW-003", "title": "New privileged role assignment outside the usual pattern",
@@ -58,7 +67,7 @@ HUNTS = [
         "hypothesis": "A privileged role assignment outside the expected change window may be unauthorized or may reflect an approved change.",
         "look_for": "Role assignment, actor identity, target account, timestamp, and a matching change record if available.",
         "limits": "The synthetic dataset does not include a real change-management system, so authorization cannot be confirmed from these events alone.",
-        "expected": "inconclusive", "dataset": "privilege"
+        "dataset": "privilege"
     }
 ]
 
@@ -107,25 +116,74 @@ def db_session():
 
 
 def init_db() -> None:
+    """Create the database schema and seed the synthetic event set once.
+
+    Older HuntWeave releases used one shared hunt_notes row per scenario.
+    Preserve that table under a legacy name before creating the per-browser
+    workspace schema introduced in the hosted-demo release.
+    """
     with db_session() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS events (
-            id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, source TEXT NOT NULL,
-            event_type TEXT NOT NULL, account TEXT NOT NULL, host TEXT NOT NULL,
-            source_ip TEXT NOT NULL, message TEXT NOT NULL, severity TEXT NOT NULL,
-            analyst_hint TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS hunt_notes (
-            hunt_id TEXT PRIMARY KEY, verdict TEXT NOT NULL DEFAULT 'NOT_REVIEWED',
-            notes TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
-        );
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, source TEXT NOT NULL,
+                event_type TEXT NOT NULL, account TEXT NOT NULL, host TEXT NOT NULL,
+                source_ip TEXT NOT NULL, message TEXT NOT NULL, severity TEXT NOT NULL,
+                analyst_hint TEXT NOT NULL
+            )
         """)
+
+        notes_info = conn.execute("PRAGMA table_info(hunt_notes)").fetchall()
+        if notes_info:
+            note_columns = {row["name"] for row in notes_info}
+            primary_key = [
+                row["name"] for row in sorted(notes_info, key=lambda item: item["pk"])
+                if row["pk"]
+            ]
+            if "visitor_id" not in note_columns or primary_key != ["visitor_id", "hunt_id"]:
+                legacy_name = "hunt_notes_legacy"
+                suffix = 1
+                while conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (legacy_name,),
+                ).fetchone():
+                    suffix += 1
+                    legacy_name = f"hunt_notes_legacy_{suffix}"
+                conn.execute(f'ALTER TABLE hunt_notes RENAME TO "{legacy_name}"')
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hunt_notes (
+                visitor_id TEXT NOT NULL, hunt_id TEXT NOT NULL,
+                verdict TEXT NOT NULL DEFAULT 'NOT_REVIEWED',
+                notes TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+                PRIMARY KEY (visitor_id, hunt_id)
+            )
+        """)
+
         count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         if count == 0:
-            conn.executemany("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)", EVENTS)
+            conn.executemany(
+                "INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                EVENTS,
+            )
+
+
+def ensure_visitor_workspace(visitor_id: str) -> None:
+    with db_session() as conn:
         for hunt in HUNTS:
-            conn.execute("INSERT OR IGNORE INTO hunt_notes(hunt_id, verdict, notes, updated_at) VALUES(?,?,?,?)",
-                         (hunt["id"], "NOT_REVIEWED", "", datetime.now(timezone.utc).isoformat()))
+            conn.execute(
+                "INSERT OR IGNORE INTO hunt_notes(visitor_id, hunt_id, verdict, notes, updated_at) VALUES(?,?,?,?,?)",
+                (visitor_id, hunt["id"], "NOT_REVIEWED", "", datetime.now(timezone.utc).isoformat()),
+            )
+
+
+@app.before_request
+def prepare_visitor_workspace() -> None:
+    # Static assets and health probes do not need a visitor workspace.
+    if request.endpoint == "static" or request.path == "/health":
+        return
+    if "visitor_id" not in session:
+        session["visitor_id"] = secrets.token_urlsafe(24)
+    ensure_visitor_workspace(session["visitor_id"])
 
 
 def hunt_by_id(hunt_id: str) -> dict[str, Any] | None:
@@ -153,7 +211,7 @@ def related_events(hunt: dict[str, Any], q: str = "", source: str = "all") -> li
 @app.get("/")
 def index():
     with db_session() as conn:
-        notes = {r["hunt_id"]: dict(r) for r in conn.execute("SELECT * FROM hunt_notes")}
+        notes = {r["hunt_id"]: dict(r) for r in conn.execute("SELECT * FROM hunt_notes WHERE visitor_id=?", (session["visitor_id"],))}
         event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     hunts = []
     verdict_labels = {
@@ -182,8 +240,19 @@ def api_hunt(hunt_id: str):
     if source not in {"all", "identity", "endpoint", "privilege"}:
         return jsonify({"error": "Invalid source filter"}), 400
     with db_session() as conn:
-        note = conn.execute("SELECT * FROM hunt_notes WHERE hunt_id=?", (hunt_id,)).fetchone()
-    return jsonify({"hunt": hunt, "events": related_events(hunt, q, source), "note": dict(note) if note else None})
+        note = conn.execute("SELECT * FROM hunt_notes WHERE visitor_id=? AND hunt_id=?", (session["visitor_id"], hunt_id)).fetchone()
+    public_hunt = {key: hunt[key] for key in (
+        "id", "title", "category", "level", "technique", "hypothesis", "look_for", "limits"
+    )}
+    public_note = (
+        {key: note[key] for key in ("hunt_id", "verdict", "notes", "updated_at")}
+        if note else None
+    )
+    return jsonify({
+        "hunt": public_hunt,
+        "events": related_events(hunt, q, source),
+        "note": public_note,
+    })
 
 
 @app.post("/api/hunts/<hunt_id>/review")
@@ -201,8 +270,8 @@ def review_hunt(hunt_id: str):
     if not isinstance(notes, str) or len(notes) > 2000:
         return jsonify({"error": "Notes must be text up to 2000 characters"}), 400
     with db_session() as conn:
-        conn.execute("UPDATE hunt_notes SET verdict=?, notes=?, updated_at=? WHERE hunt_id=?",
-                     (verdict, notes.strip(), datetime.now(timezone.utc).isoformat(), hunt_id))
+        conn.execute("UPDATE hunt_notes SET verdict=?, notes=?, updated_at=? WHERE visitor_id=? AND hunt_id=?",
+                     (verdict, notes.strip(), datetime.now(timezone.utc).isoformat(), session["visitor_id"], hunt_id))
     return jsonify({"ok": True, "hunt_id": hunt_id, "verdict": verdict})
 
 
@@ -213,8 +282,8 @@ def reset_hunt(hunt_id: str):
         abort(404)
     with db_session() as conn:
         conn.execute(
-            "UPDATE hunt_notes SET verdict=?, notes=?, updated_at=? WHERE hunt_id=?",
-            ("NOT_REVIEWED", "", datetime.now(timezone.utc).isoformat(), hunt_id),
+            "UPDATE hunt_notes SET verdict=?, notes=?, updated_at=? WHERE visitor_id=? AND hunt_id=?",
+            ("NOT_REVIEWED", "", datetime.now(timezone.utc).isoformat(), session["visitor_id"], hunt_id),
         )
     return jsonify({"ok": True, "hunt_id": hunt_id, "verdict": "NOT_REVIEWED", "notes": ""})
 
@@ -240,7 +309,7 @@ def report(hunt_id: str):
     if not hunt:
         abort(404)
     with db_session() as conn:
-        row = conn.execute("SELECT * FROM hunt_notes WHERE hunt_id=?", (hunt_id,)).fetchone()
+        row = conn.execute("SELECT * FROM hunt_notes WHERE visitor_id=? AND hunt_id=?", (session["visitor_id"], hunt_id)).fetchone()
     note = dict(row) if row else {"verdict": "NOT_REVIEWED", "notes": ""}
     events = related_events(hunt)
     report_data = {
@@ -259,9 +328,18 @@ def report(hunt_id: str):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "mode": "educational-synthetic-data", "database": "sqlite"})
+    with db_session() as conn:
+        event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    return jsonify({
+        "status": "ok",
+        "mode": "educational-synthetic-data",
+        "database": "sqlite",
+        "synthetic_event_count": event_count,
+    })
 
+
+# Initialize schema at import time so production WSGI servers (e.g. Gunicorn) are ready.
+init_db()
 
 if __name__ == "__main__":
-    init_db()
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "5055")), debug=False)
